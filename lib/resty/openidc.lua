@@ -50,7 +50,6 @@ local table = table
 local ipairs = ipairs
 local pairs = pairs
 local type = type
-local tostring = tostring
 local ngx = ngx
 local b64 = ngx.encode_base64
 local b64url = require("ngx.base64").encode_base64url
@@ -82,6 +81,16 @@ local openidc = {
   _VERSION = "1.8.0"
 }
 
+local supported_dpop_signing_algs = {
+  ES256 = true,
+  RS256 = true,
+  PS256 = true
+}
+
+local function openidc_unsupported_dpop_signing_alg_error(alg)
+  return "configured value for dpop_signing_alg (" .. alg .. ") is not supported"
+end
+
 local function openidc_supported_discovery_value(values, value)
   if values == nil then
     return true
@@ -95,11 +104,8 @@ local function openidc_supported_discovery_value(values, value)
 end
 
 local function openidc_dpop_jti()
-  local seed = (ngx.var.request_id or "") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
-  local sha256 = require("resty.sha256")
-  local digest = sha256:new()
-  digest:update(seed)
-  return b64url(digest:final())
+  local resty_random = require("resty.random")
+  return b64url(resty_random.bytes(32))
 end
 
 local function openidc_sha256(value)
@@ -109,7 +115,20 @@ local function openidc_sha256(value)
   return digest:final()
 end
 
-local function openidc_jwt_sign(private_key, header, payload, alg)
+local function openidc_dpop_signing_params(pkey, alg)
+  if alg == "ES256" then
+    return nil, { ecdsa_use_raw = true }
+  end
+  if alg == "RS256" then
+    return pkey.PADDINGS.RSA_PKCS1_PADDING
+  end
+  if alg == "PS256" then
+    return pkey.PADDINGS.RSA_PKCS1_PSS_PADDING, { "rsa_pss_saltlen:digest", "rsa_mgf1_md:sha256" }
+  end
+  return nil, nil, openidc_unsupported_dpop_signing_alg_error(alg)
+end
+
+local function openidc_dpop_sign(private_key, header, payload, alg)
   local signing_input = b64url(cjson.encode(header)) .. "." .. b64url(cjson.encode(payload))
   local pkey = require("resty.openssl.pkey")
   local key, err = pkey.new(private_key)
@@ -117,17 +136,9 @@ local function openidc_jwt_sign(private_key, header, payload, alg)
     return nil, "unable to load DPoP private key: " .. err
   end
 
-  local padding
-  local opts
-  if alg == "ES256" then
-    opts = { ecdsa_use_raw = true }
-  elseif alg == "RS256" then
-    padding = pkey.PADDINGS.RSA_PKCS1_PADDING
-  elseif alg == "PS256" then
-    padding = pkey.PADDINGS.RSA_PKCS1_PSS_PADDING
-    opts = { "rsa_pss_saltlen:digest", "rsa_mgf1_md:sha256" }
-  else
-    return nil, "configured value for dpop_signing_alg (" .. alg .. ") is not supported"
+  local padding, opts, unsupported_err = openidc_dpop_signing_params(pkey, alg)
+  if unsupported_err then
+    return nil, unsupported_err
   end
 
   local signature
@@ -153,8 +164,8 @@ local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
   end
 
   local alg = opts.dpop_signing_alg or "ES256"
-  if alg ~= "ES256" and alg ~= "RS256" and alg ~= "PS256" then
-    return nil, "configured value for dpop_signing_alg (" .. alg .. ") is not supported"
+  if not supported_dpop_signing_algs[alg] then
+    return nil, openidc_unsupported_dpop_signing_alg_error(alg)
   end
   if opts.discovery and not openidc_supported_discovery_value(opts.discovery.dpop_signing_alg_values_supported, alg) then
     return nil, "configured value for dpop_signing_alg (" .. alg .. ") NOT found in dpop_signing_alg_values_supported in metadata"
@@ -182,7 +193,7 @@ local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
     jwk = opts.dpop_public_jwk,
   }
 
-  return openidc_jwt_sign(opts.dpop_private_key, header, payload, alg)
+  return openidc_dpop_sign(opts.dpop_private_key, header, payload, alg)
 end
 openidc.__index = openidc
 

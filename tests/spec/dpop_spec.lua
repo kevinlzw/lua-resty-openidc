@@ -42,7 +42,7 @@ local function generate_dpop_opts()
   local public_point_path = prefix .. ".pub"
 
   assert_command("openssl ecparam -name prime256v1 -genkey -noout -out " .. private_key_path)
-  assert_command("openssl ec -in " .. private_key_path .. " -pubout -outform DER | openssl asn1parse -inform DER -strparse 23 -noout -out " .. public_point_path)
+  assert_command("openssl ec -in " .. private_key_path .. " -pubout -outform DER 2>/dev/null | openssl asn1parse -inform DER -strparse 23 -noout -out " .. public_point_path)
 
   local public_point = load_file(public_point_path)
   assert.are.equals(65, #public_point)
@@ -199,9 +199,7 @@ describe("when DPoP is enabled with PS256", function()
     test_support.login()
 
     local token_dpop_header = logged_dpop_header("token")
-    if not token_dpop_header then
-      error("missing PS256 DPoP header; log: " .. test_support.load("/tmp/server/logs/error.log"))
-    end
+    assert.truthy(token_dpop_header)
     token_header = decode_jwt(token_dpop_header)
   end)
 

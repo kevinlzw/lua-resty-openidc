@@ -150,7 +150,7 @@ h2JHukolz9xf6qN61QMLSd83+kwoBr2drp6xg3eGDLIkQCQLrkY=
              -- once when the OP returns a DPoP-Nonce challenge.
              --use_dpop = false,
              --dpop_signing_alg = "ES256",
-             --dpop_private_key = "PEM-encoded P-256 private key",
+             --dpop_private_key = "PEM-encoded private key matching dpop_signing_alg",
              --dpop_public_jwk = {
              --  kty = "EC",
              --  crv = "P-256",
