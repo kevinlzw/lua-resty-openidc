@@ -146,7 +146,7 @@ h2JHukolz9xf6qN61QMLSd83+kwoBr2drp6xg3eGDLIkQCQLrkY=
              --pushed_authorization_request_endpoint_auth_method = "client_secret_basic",
              -- When use_dpop is set to true, lua-resty-openidc will send OAuth 2.0 DPoP (RFC 9449)
              -- proof JWTs to the token endpoint and will use DPoP-bound access tokens for userinfo.
-             -- The initial DPoP implementation supports ES256 proofs and retries token/userinfo calls
+             -- The initial DPoP implementation supports ES256, RS256, and PS256 proofs and retries token/userinfo calls
              -- once when the OP returns a DPoP-Nonce challenge.
              --use_dpop = false,
              --dpop_signing_alg = "ES256",

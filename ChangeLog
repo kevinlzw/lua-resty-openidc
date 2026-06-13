@@ -3,6 +3,7 @@ unreleased
   RFC 9126) through the opt-in use_par option.
 - added support for OAuth 2.0 DPoP client proof generation (RFC 9449)
   through the opt-in use_dpop option.
+- added ES256, RS256, and PS256 signing support for DPoP proofs.
 - added DPoP nonce retry support for token and userinfo endpoint calls.
 - added support for configuring the client assertion JWT signing algorithm
   with client_jwt_assertion_alg.

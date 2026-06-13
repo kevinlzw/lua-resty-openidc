@@ -30,6 +30,12 @@ local function load_file(path)
   return value
 end
 
+local function write_file(path, value)
+  local file = assert(io.open(path, "wb"))
+  file:write(value)
+  file:close()
+end
+
 local function generate_dpop_opts()
   local prefix = "/tmp/dpop-spec-" .. tostring(math.random(1000000000))
   local private_key_path = prefix .. ".pem"
@@ -52,28 +58,46 @@ local function generate_dpop_opts()
       x = b64url(public_point:sub(2, 33)),
       y = b64url(public_point:sub(34, 65)),
     },
+    discovery = {
+      dpop_signing_alg_values_supported = { "ES256", "RS256", "PS256" },
+    }
   }
 end
 
-local dpop_opts = generate_dpop_opts()
-local dpop_public_jwk = dpop_opts.dpop_public_jwk
+local rsa_private_key = test_support.load("/spec/private_rsa_key.pem")
+local rsa_public_key = test_support.load("/spec/public_rsa_key.pem")
+local rsa_public_jwk = json.decode(test_support.load("/spec/rsa_key_jwk_with_n_and_e.json")).keys[1]
+
+local function dpop_opts_with_rsa_alg(alg)
+  return {
+    use_dpop = true,
+    dpop_signing_alg = alg,
+    dpop_private_key = rsa_private_key,
+    dpop_public_jwk = rsa_public_jwk,
+    discovery = {
+      dpop_signing_alg_values_supported = { "ES256", "RS256", "PS256" },
+    }
+  }
+end
 
 local function decode_jwt(jwt)
-  local header, payload = jwt:match("^([^.]+)%.([^.]+)%.")
-  assert.truthy(header)
-  assert.truthy(payload)
-  return json.decode(b64url_decode(header)), json.decode(b64url_decode(payload))
+  jwt = test_support.trim(jwt)
+  local header, payload, signature = jwt:match("^([^.]+)%.([^.]+)%.([^.]+)$")
+  if not header or not payload or not signature then
+    error("could not parse JWT: " .. tostring(jwt))
+  end
+  return json.decode(b64url_decode(header)), json.decode(b64url_decode(payload)), header .. "." .. payload, b64url_decode(signature)
 end
 
 local function logged_dpop_header(prefix)
   local log = test_support.load("/tmp/server/logs/error.log")
-  return log:match(prefix .. " dpop header: ([^\n]+)")
+  return log:match(prefix .. " dpop header: ([A-Za-z0-9_%-%.]+)")
 end
 
 local function logged_dpop_headers(prefix)
   local headers = {}
   local log = test_support.load("/tmp/server/logs/error.log")
-  for header in log:gmatch(prefix .. " dpop header: ([^\n]+)") do
+  for header in log:gmatch(prefix .. " dpop header: ([A-Za-z0-9_%-%.]+)") do
     table.insert(headers, header)
   end
   return headers
@@ -83,10 +107,32 @@ local function expected_ath(access_token)
   return b64url(sha2.bytes(access_token))
 end
 
+local function verify_dpop_signature(jwt, public_key, alg)
+  local _, _, signing_input, signature = decode_jwt(jwt)
+  local prefix = "/tmp/dpop-verify-" .. tostring(math.random(1000000000))
+  local public_key_path = prefix .. ".pem"
+  local signing_input_path = prefix .. ".txt"
+  local signature_path = prefix .. ".sig"
+
+  write_file(public_key_path, public_key)
+  write_file(signing_input_path, signing_input)
+  write_file(signature_path, signature)
+
+  local command = "openssl dgst -sha256 -verify " .. public_key_path .. " -signature " .. signature_path
+  if alg == "PS256" then
+    command = command .. " -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest -sigopt rsa_mgf1_md:sha256"
+  end
+  command = command .. " " .. signing_input_path .. " >/dev/null"
+  assert_command(command)
+end
+
 describe("when DPoP is enabled", function()
   local token_header, token_payload, userinfo_header, userinfo_payload
+  local dpop_public_jwk
 
   setup(function()
+    local dpop_opts = generate_dpop_opts()
+    dpop_public_jwk = dpop_opts.dpop_public_jwk
     test_support.start_server({
       oidc_opts = dpop_opts,
     })
@@ -121,13 +167,61 @@ describe("when DPoP is enabled", function()
   end)
 end)
 
+describe("when DPoP is enabled with RS256", function()
+  local token_header
+
+  setup(function()
+    test_support.start_server({
+      oidc_opts = dpop_opts_with_rsa_alg("RS256"),
+    })
+    test_support.login()
+
+    token_header = decode_jwt(logged_dpop_header("token"))
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("adds an RS256-signed DPoP proof to the token endpoint call", function()
+    assert.are.equals("dpop+jwt", token_header.typ)
+    assert.are.equals("RS256", token_header.alg)
+    assert.are.same(rsa_public_jwk, token_header.jwk)
+    verify_dpop_signature(logged_dpop_header("token"), rsa_public_key, "RS256")
+  end)
+end)
+
+describe("when DPoP is enabled with PS256", function()
+  local token_header
+
+  setup(function()
+    test_support.start_server({
+      oidc_opts = dpop_opts_with_rsa_alg("PS256"),
+    })
+    test_support.login()
+
+    local token_dpop_header = logged_dpop_header("token")
+    if not token_dpop_header then
+      error("missing PS256 DPoP header; log: " .. test_support.load("/tmp/server/logs/error.log"))
+    end
+    token_header = decode_jwt(token_dpop_header)
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("adds a PS256-signed DPoP proof to the token endpoint call", function()
+    assert.are.equals("dpop+jwt", token_header.typ)
+    assert.are.equals("PS256", token_header.alg)
+    assert.are.same(rsa_public_jwk, token_header.jwk)
+    verify_dpop_signature(logged_dpop_header("token"), rsa_public_key, "PS256")
+  end)
+end)
+
 describe("when the token endpoint requests a DPoP nonce", function()
   local token_headers, first_payload, second_payload
 
   setup(function()
     test_support.start_server({
       token_dpop_nonce_challenge = "true",
-      oidc_opts = dpop_opts,
+      oidc_opts = generate_dpop_opts(),
     })
     test_support.login()
 
@@ -152,7 +246,7 @@ describe("when the userinfo endpoint requests a DPoP nonce", function()
   setup(function()
     test_support.start_server({
       userinfo_dpop_nonce_challenge = "true",
-      oidc_opts = dpop_opts,
+      oidc_opts = generate_dpop_opts(),
     })
     test_support.login()
 
@@ -175,7 +269,7 @@ describe("when DPoP is enabled and the access token is refreshed", function()
   setup(function()
     test_support.start_server({
       token_response_expires_in = 0,
-      oidc_opts = dpop_opts,
+      oidc_opts = generate_dpop_opts(),
     })
 
     local _, _, cookies = test_support.login()
@@ -199,10 +293,11 @@ describe("when DPoP is enabled without a private key", function()
   local status
 
   setup(function()
+    local dpop_opts = generate_dpop_opts()
     test_support.start_server({
       oidc_opts = {
         use_dpop = true,
-        dpop_public_jwk = dpop_public_jwk,
+        dpop_public_jwk = dpop_opts.dpop_public_jwk,
       },
     })
 
@@ -222,6 +317,7 @@ describe("when DPoP is enabled without a public JWK", function()
   local status
 
   setup(function()
+    local dpop_opts = generate_dpop_opts()
     test_support.start_server({
       oidc_opts = {
         use_dpop = true,
@@ -245,11 +341,12 @@ describe("when DPoP signing alg is not supported by discovery metadata", functio
   local status
 
   setup(function()
+    local dpop_opts = generate_dpop_opts()
     test_support.start_server({
       oidc_opts = {
         use_dpop = true,
         dpop_private_key = dpop_opts.dpop_private_key,
-        dpop_public_jwk = dpop_public_jwk,
+        dpop_public_jwk = dpop_opts.dpop_public_jwk,
         discovery = {
           dpop_signing_alg_values_supported = { "PS256" },
         }
