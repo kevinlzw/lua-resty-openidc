@@ -138,6 +138,20 @@ h2JHukolz9xf6qN61QMLSd83+kwoBr2drp6xg3eGDLIkQCQLrkY=
              --pushed_authorization_request_endpoint = "https://MY_OP/pushed_authorization_request",
              -- Override the client authentication method for the PAR endpoint. Defaults to token_endpoint_auth_method.
              --pushed_authorization_request_endpoint_auth_method = "client_secret_basic",
+             -- When use_dpop is set to true, lua-resty-openidc will send OAuth 2.0 DPoP (RFC 9449)
+             -- proof JWTs to the token endpoint and will use DPoP-bound access tokens for userinfo.
+             -- The initial DPoP implementation supports ES256 proofs.
+             --use_dpop = false,
+             --dpop_signing_alg = "ES256",
+             --dpop_private_key = [[-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----]],
+             --dpop_public_jwk = {
+             --  kty = "EC",
+             --  crv = "P-256",
+             --  x = "...",
+             --  y = "..."
+             --},
              --scope = "openid email profile",
              -- Refresh the users id_token after 900 seconds without requiring re-authentication
              --refresh_session_interval = 900,

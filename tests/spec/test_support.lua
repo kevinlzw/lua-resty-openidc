@@ -235,6 +235,8 @@ http {
                 ngx.log(ngx.ERR, "Received token request: " .. ngx.req.get_body_data())
                 local auth = ngx.req.get_headers()["Authorization"]
                 ngx.log(ngx.ERR, "token authorization header: " .. (auth and auth or ""))
+                local dpop = ngx.req.get_headers()["DPoP"]
+                ngx.log(ngx.ERR, "token dpop header: " .. (dpop and dpop or ""))
                 ngx.header.content_type = 'application/json;charset=UTF-8'
                 local args = ngx.req.get_post_args()
                 local id_token
@@ -354,6 +356,8 @@ http {
                 test_globals.delay(USERINFO_DELAY_RESPONSE)
                 local auth = ngx.req.get_headers()["Authorization"]
                 ngx.log(ngx.ERR, "userinfo authorization header: " .. (auth and auth or ""))
+                local dpop = ngx.req.get_headers()["DPoP"]
+                ngx.log(ngx.ERR, "userinfo dpop header: " .. (dpop and dpop or ""))
                 ngx.header.content_type = 'application/json;charset=UTF-8'
                 ngx.say(test_globals.cjson.encode(USERINFO))
             }

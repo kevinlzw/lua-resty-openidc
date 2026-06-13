@@ -50,6 +50,7 @@ local table = table
 local ipairs = ipairs
 local pairs = pairs
 local type = type
+local tostring = tostring
 local ngx = ngx
 local b64 = ngx.encode_base64
 local b64url = require("ngx.base64").encode_base64url
@@ -80,6 +81,95 @@ local supported_token_auth_methods = {
 local openidc = {
   _VERSION = "1.8.0"
 }
+
+local function openidc_supported_discovery_value(values, value)
+  if values == nil then
+    return true
+  end
+  for _, supported in ipairs(values) do
+    if supported == value then
+      return true
+    end
+  end
+  return false
+end
+
+local function openidc_dpop_jti()
+  local seed = (ngx.var.request_id or "") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
+  local sha256 = require("resty.sha256")
+  local digest = sha256:new()
+  digest:update(seed)
+  return b64url(digest:final())
+end
+
+local function openidc_sha256(value)
+  local sha256 = require("resty.sha256")
+  local digest = sha256:new()
+  digest:update(value)
+  return digest:final()
+end
+
+local function openidc_jwt_sign_es256(private_key, header, payload)
+  local signing_input = b64url(cjson.encode(header)) .. "." .. b64url(cjson.encode(payload))
+  local pkey = require("resty.openssl.pkey")
+  local key, err = pkey.new(private_key)
+  if err then
+    return nil, "unable to load DPoP private key: " .. err
+  end
+
+  local signature
+  signature, err = key:sign(signing_input, "sha256", nil, { ecdsa_use_raw = true })
+  if err then
+    return nil, "unable to sign DPoP proof: " .. err
+  end
+
+  return signing_input .. "." .. b64url(signature)
+end
+
+local function openidc_dpop_proof(opts, htm, htu, access_token)
+  if not opts.use_dpop then
+    return nil
+  end
+
+  if not opts.dpop_private_key then
+    return nil, "Can't use DPoP without opts.dpop_private_key"
+  end
+
+  if not opts.dpop_public_jwk then
+    return nil, "Can't use DPoP without opts.dpop_public_jwk"
+  end
+
+  local alg = opts.dpop_signing_alg or "ES256"
+  if alg ~= "ES256" then
+    return nil, "configured value for dpop_signing_alg (" .. alg .. ") is not supported"
+  end
+  if opts.discovery and not openidc_supported_discovery_value(opts.discovery.dpop_signing_alg_values_supported, alg) then
+    return nil, "configured value for dpop_signing_alg (" .. alg .. ") NOT found in dpop_signing_alg_values_supported in metadata"
+  end
+
+  local payload = {
+    jti = openidc_dpop_jti(),
+    htm = htm,
+    htu = htu,
+    iat = ngx.time(),
+  }
+
+  if access_token then
+    payload.ath = b64url(openidc_sha256(access_token))
+  end
+
+  if opts.dpop_nonce then
+    payload.nonce = opts.dpop_nonce
+  end
+
+  local header = {
+    typ = "dpop+jwt",
+    alg = alg,
+    jwk = opts.dpop_public_jwk,
+  }
+
+  return openidc_jwt_sign_es256(opts.dpop_private_key, header, payload)
+end
 openidc.__index = openidc
 
 local function store_in_session(opts, feature)
@@ -497,6 +587,7 @@ end
 -- make a call to the token endpoint
 function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, ignore_body_on_success, expected_status)
   local ignore_body_on_success = ignore_body_on_success or false
+  local err
 
   local ep_name = endpoint_name or 'token'
   if not endpoint then
@@ -557,6 +648,16 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     end
   end
 
+  if ep_name == "token" and opts.use_dpop then
+    local proof
+    proof, err = openidc_dpop_proof(opts, "POST", endpoint)
+    if err then
+      return nil, err
+    end
+    headers.DPoP = proof
+    log(DEBUG, "DPoP proof header added to " .. ep_name .. " endpoint call")
+  end
+
   local pass_cookies = opts.pass_cookies
   if pass_cookies then
     if ngx.req.get_headers()["Cookie"] then
@@ -576,7 +677,8 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
   local httpc = http.new()
   openidc_configure_timeouts(httpc, opts.timeout)
   openidc_configure_proxy(httpc, opts.proxy_opts)
-  local res, err = httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
+  local res
+  res, err = httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
     method = "POST",
     body = ngx.encode_args(body),
     headers = headers,
@@ -677,11 +779,26 @@ function openidc.call_userinfo_endpoint(opts, access_token)
     return nil, nil
   end
 
-  local headers = {
-    ["Authorization"] = "Bearer " .. access_token,
-  }
+  local headers
+  if opts.use_dpop then
+    local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token)
+    if proof_err then
+      return nil, proof_err
+    end
+    headers = {
+      ["Authorization"] = "DPoP " .. access_token,
+      ["DPoP"] = proof,
+    }
+  else
+    headers = {
+      ["Authorization"] = "Bearer " .. access_token,
+    }
+  end
 
   log(DEBUG, "authorization header '" .. headers.Authorization .. "'")
+  if headers.DPoP then
+    log(DEBUG, "DPoP proof header added to userinfo endpoint call")
+  end
 
   local httpc = http.new()
   openidc_configure_timeouts(httpc, opts.timeout)
