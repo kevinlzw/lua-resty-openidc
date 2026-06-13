@@ -5,20 +5,6 @@ local sha2 = require("sha2")
 local test_support = require("test_support")
 require 'busted.runner'()
 
-local dpop_public_jwk = {
-  kty = "EC",
-  crv = "P-256",
-  x = "54-lhsmIsmguHg4xLmPhng5pMmuV5KOQlx4ntEEXpIE",
-  y = "snSphjPmyBR6c_inWxgVH3n1F94-GMIzzj8wuzu0kBc",
-}
-
-local dpop_opts = {
-  use_dpop = true,
-  dpop_signing_alg = "ES256",
-  dpop_private_key = test_support.load("/spec/private_ec_key.pem"),
-  dpop_public_jwk = dpop_public_jwk,
-}
-
 local function b64url_decode(value)
   value = value:gsub("-", "+"):gsub("_", "/")
   local padding = #value % 4
@@ -31,6 +17,46 @@ end
 local function b64url(value)
   return mime.b64(value):gsub("+", "-"):gsub("/", "_"):gsub("=", "")
 end
+
+local function assert_command(command)
+  local ok = os.execute(command)
+  assert.truthy(ok == true or ok == 0)
+end
+
+local function load_file(path)
+  local file = assert(io.open(path, "rb"))
+  local value = file:read("*a")
+  file:close()
+  return value
+end
+
+local function generate_dpop_opts()
+  local prefix = "/tmp/dpop-spec-" .. tostring(math.random(1000000000))
+  local private_key_path = prefix .. ".pem"
+  local public_point_path = prefix .. ".pub"
+
+  assert_command("openssl ecparam -name prime256v1 -genkey -noout -out " .. private_key_path)
+  assert_command("openssl ec -in " .. private_key_path .. " -pubout -outform DER | openssl asn1parse -inform DER -strparse 23 -noout -out " .. public_point_path)
+
+  local public_point = load_file(public_point_path)
+  assert.are.equals(65, #public_point)
+  assert.are.equals(string.char(4), public_point:sub(1, 1))
+
+  return {
+    use_dpop = true,
+    dpop_signing_alg = "ES256",
+    dpop_private_key = load_file(private_key_path),
+    dpop_public_jwk = {
+      kty = "EC",
+      crv = "P-256",
+      x = b64url(public_point:sub(2, 33)),
+      y = b64url(public_point:sub(34, 65)),
+    },
+  }
+end
+
+local dpop_opts = generate_dpop_opts()
+local dpop_public_jwk = dpop_opts.dpop_public_jwk
 
 local function decode_jwt(jwt)
   local header, payload = jwt:match("^([^.]+)%.([^.]+)%.")
@@ -199,7 +225,7 @@ describe("when DPoP is enabled without a public JWK", function()
     test_support.start_server({
       oidc_opts = {
         use_dpop = true,
-        dpop_private_key = test_support.load("/spec/private_ec_key.pem"),
+        dpop_private_key = dpop_opts.dpop_private_key,
       },
     })
 
@@ -222,7 +248,7 @@ describe("when DPoP signing alg is not supported by discovery metadata", functio
     test_support.start_server({
       oidc_opts = {
         use_dpop = true,
-        dpop_private_key = test_support.load("/spec/private_ec_key.pem"),
+        dpop_private_key = dpop_opts.dpop_private_key,
         dpop_public_jwk = dpop_public_jwk,
         discovery = {
           dpop_signing_alg_values_supported = { "PS256" },

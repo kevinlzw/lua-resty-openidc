@@ -299,6 +299,25 @@ describe("when 'private_key_jwt' auth method is configured with a client_jwt_ass
   end)
 end)
 
+describe("when 'private_key_jwt' auth method is configured with a client_jwt_assertion_audience", function()
+  test_support.start_server({
+    oidc_opts = {
+      discovery = {
+        token_endpoint_auth_methods_supported = { "private_key_jwt" },
+      },
+      token_endpoint_auth_method = "private_key_jwt",
+      client_rsa_private_key = test_support.load("/spec/private_rsa_key.pem"),
+      client_jwt_assertion_audience = "https://issuer.example.com/token",
+    }
+  })
+  teardown(test_support.stop_server)
+  test_support.login()
+  local jwt = extract_jwt_from_error_log()
+  it("uses the configured client assertion audience", function()
+    assert.are.equal("https://issuer.example.com/token", jwt.payload.aud)
+  end)
+end)
+
 describe("when 'private_key_jwt' auth method is configured with an unsupported client_jwt_assertion_alg", function()
   test_support.start_server({
     oidc_opts = {
