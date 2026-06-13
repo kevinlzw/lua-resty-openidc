@@ -26,7 +26,7 @@ dependencies = {
     "lua-resty-http >= 0.08",
     "lua-resty-session >= 4.0.3",
     "lua-resty-jwt >= 0.2.0",
-    "lua-resty-openssl >= 0.8.0"
+    "lua-resty-openssl >= 1.8.0"
 }
 build = {
     type = "builtin",
