@@ -126,7 +126,7 @@ local function openidc_jwt_sign_es256(private_key, header, payload)
   return signing_input .. "." .. b64url(signature)
 end
 
-local function openidc_dpop_proof(opts, htm, htu, access_token)
+local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
   if not opts.use_dpop then
     return nil
   end
@@ -158,8 +158,9 @@ local function openidc_dpop_proof(opts, htm, htu, access_token)
     payload.ath = b64url(openidc_sha256(access_token))
   end
 
-  if opts.dpop_nonce then
-    payload.nonce = opts.dpop_nonce
+  nonce = nonce or opts.dpop_nonce
+  if nonce then
+    payload.nonce = nonce
   end
 
   local header = {
@@ -584,6 +585,13 @@ local function openidc_configure_proxy(httpc, proxy_opts)
   end
 end
 
+local function openidc_dpop_nonce_from_response(res)
+  if not res or res.status ~= 401 then
+    return nil
+  end
+  return get_first_header(res.headers, "DPoP-Nonce") or get_first_header(res.headers, "dpop-nonce")
+end
+
 -- make a call to the token endpoint
 function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, ignore_body_on_success, expected_status)
   local ignore_body_on_success = ignore_body_on_success or false
@@ -658,16 +666,6 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     end
   end
 
-  if ep_name == "token" and opts.use_dpop then
-    local proof
-    proof, err = openidc_dpop_proof(opts, "POST", endpoint)
-    if err then
-      return nil, err
-    end
-    headers.DPoP = proof
-    log(DEBUG, "DPoP proof header added to " .. ep_name .. " endpoint call")
-  end
-
   local pass_cookies = opts.pass_cookies
   if pass_cookies then
     if ngx.req.get_headers()["Cookie"] then
@@ -684,21 +682,57 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   log(DEBUG, "request body for " .. ep_name .. " endpoint call: ", ngx.encode_args(body))
 
-  local httpc = http.new()
-  openidc_configure_timeouts(httpc, opts.timeout)
-  openidc_configure_proxy(httpc, opts.proxy_opts)
+  local function request_token_endpoint(dpop_nonce)
+    local request_headers = {}
+    for k, v in pairs(headers) do
+      request_headers[k] = v
+    end
+    if ep_name == "token" and opts.use_dpop then
+      local proof
+      proof, err = openidc_dpop_proof(opts, "POST", endpoint, nil, dpop_nonce)
+      if err then
+        return nil, err, true
+      end
+      request_headers.DPoP = proof
+      log(DEBUG, "DPoP proof header added to " .. ep_name .. " endpoint call")
+    end
+
+    local httpc = http.new()
+    openidc_configure_timeouts(httpc, opts.timeout)
+    openidc_configure_proxy(httpc, opts.proxy_opts)
+    return httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
+      method = "POST",
+      body = ngx.encode_args(body),
+      headers = request_headers,
+      ssl_verify = (opts.ssl_verify ~= "no"),
+      keepalive = (opts.keepalive ~= "no")
+    }))
+  end
+
   local res
-  res, err = httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
-    method = "POST",
-    body = ngx.encode_args(body),
-    headers = headers,
-    ssl_verify = (opts.ssl_verify ~= "no"),
-    keepalive = (opts.keepalive ~= "no")
-  }))
+  local proof_err
+  res, err, proof_err = request_token_endpoint()
+  if proof_err then
+    return nil, err
+  end
   if not res then
     err = "accessing " .. ep_name .. " endpoint (" .. endpoint .. ") failed: " .. err
     log(ERROR, err)
     return nil, err
+  end
+
+  local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res)
+  if dpop_nonce then
+    log(DEBUG, "retrying " .. ep_name .. " endpoint call with DPoP nonce")
+    res, err, proof_err = request_token_endpoint(dpop_nonce)
+    if proof_err then
+      return nil, err
+    end
+    if not res then
+      err = "accessing " .. ep_name .. " endpoint (" .. endpoint .. ") failed: " .. err
+      log(ERROR, err)
+      return nil, err
+    end
   end
 
   log(DEBUG, ep_name .. " endpoint response: ", res.body)
@@ -789,39 +823,64 @@ function openidc.call_userinfo_endpoint(opts, access_token)
     return nil, nil
   end
 
-  local headers
-  if opts.use_dpop then
-    local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token)
+  local function userinfo_headers(dpop_nonce)
+    if not opts.use_dpop then
+      return {
+        ["Authorization"] = "Bearer " .. access_token,
+      }
+    end
+
+    local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token, dpop_nonce)
     if proof_err then
       return nil, proof_err
     end
-    headers = {
+    return {
       ["Authorization"] = "DPoP " .. access_token,
       ["DPoP"] = proof,
     }
-  else
-    headers = {
-      ["Authorization"] = "Bearer " .. access_token,
-    }
   end
 
+  local headers, headers_err = userinfo_headers()
+  if headers_err then
+    return nil, headers_err
+  end
   log(DEBUG, "authorization header '" .. headers.Authorization .. "'")
   if headers.DPoP then
     log(DEBUG, "DPoP proof header added to userinfo endpoint call")
   end
 
-  local httpc = http.new()
-  openidc_configure_timeouts(httpc, opts.timeout)
-  openidc_configure_proxy(httpc, opts.proxy_opts)
-  local res, err = httpc:request_uri(opts.discovery.userinfo_endpoint,
-                                     decorate_request(opts.http_request_decorator, {
-    headers = headers,
-    ssl_verify = (opts.ssl_verify ~= "no"),
-    keepalive = (opts.keepalive ~= "no")
-  }))
+  local function request_userinfo(request_headers)
+    local httpc = http.new()
+    openidc_configure_timeouts(httpc, opts.timeout)
+    openidc_configure_proxy(httpc, opts.proxy_opts)
+    return httpc:request_uri(opts.discovery.userinfo_endpoint,
+                             decorate_request(opts.http_request_decorator, {
+      headers = request_headers,
+      ssl_verify = (opts.ssl_verify ~= "no"),
+      keepalive = (opts.keepalive ~= "no")
+    }))
+  end
+
+  local res, err = request_userinfo(headers)
   if not res then
     err = "accessing (" .. opts.discovery.userinfo_endpoint .. ") failed: " .. err
     return nil, err
+  end
+
+  local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res)
+  if dpop_nonce then
+    log(DEBUG, "retrying userinfo endpoint call with DPoP nonce")
+    headers, headers_err = userinfo_headers(dpop_nonce)
+    if headers_err then
+      return nil, headers_err
+    end
+    log(DEBUG, "authorization header '" .. headers.Authorization .. "'")
+    log(DEBUG, "DPoP proof header added to userinfo endpoint call")
+    res, err = request_userinfo(headers)
+    if not res then
+      err = "accessing (" .. opts.discovery.userinfo_endpoint .. ") failed: " .. err
+      return nil, err
+    end
   end
 
   log(DEBUG, "userinfo response: ", res.body)

@@ -8,8 +8,8 @@ require 'busted.runner'()
 local dpop_public_jwk = {
   kty = "EC",
   crv = "P-256",
-  x = "54-lhsmIsmguHg4xLmPhng5pMmuV5KOQlx4ntEEX",
-  y = "pIGydKmGM-bIFHpz-KdbGBUfefUX3j4YwjPOPzC7O7SQFw",
+  x = "54-lhsmIsmguHg4xLmPhng5pMmuV5KOQlx4ntEEXpIE",
+  y = "snSphjPmyBR6c_inWxgVH3n1F94-GMIzzj8wuzu0kBc",
 }
 
 local dpop_opts = {
@@ -42,6 +42,15 @@ end
 local function logged_dpop_header(prefix)
   local log = test_support.load("/tmp/server/logs/error.log")
   return log:match(prefix .. " dpop header: ([^\n]+)")
+end
+
+local function logged_dpop_headers(prefix)
+  local headers = {}
+  local log = test_support.load("/tmp/server/logs/error.log")
+  for header in log:gmatch(prefix .. " dpop header: ([^\n]+)") do
+    table.insert(headers, header)
+  end
+  return headers
 end
 
 local function expected_ath(access_token)
@@ -83,6 +92,56 @@ describe("when DPoP is enabled", function()
     assert.are.equals("GET", userinfo_payload.htm)
     assert.are.equals("http://127.0.0.1/user-info", userinfo_payload.htu)
     assert.are.equals(expected_ath("a_token"), userinfo_payload.ath)
+  end)
+end)
+
+describe("when the token endpoint requests a DPoP nonce", function()
+  local token_headers, first_payload, second_payload
+
+  setup(function()
+    test_support.start_server({
+      token_dpop_nonce_challenge = "true",
+      oidc_opts = dpop_opts,
+    })
+    test_support.login()
+
+    token_headers = logged_dpop_headers("token")
+    _, first_payload = decode_jwt(token_headers[1])
+    _, second_payload = decode_jwt(token_headers[2])
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("retries the token endpoint call with a nonce-bound DPoP proof", function()
+    assert.error_log_contains("retrying token endpoint call with DPoP nonce")
+    assert.are.equals(2, #token_headers)
+    assert.is_nil(first_payload.nonce)
+    assert.are.equals("token-nonce", second_payload.nonce)
+  end)
+end)
+
+describe("when the userinfo endpoint requests a DPoP nonce", function()
+  local userinfo_headers, first_payload, second_payload
+
+  setup(function()
+    test_support.start_server({
+      userinfo_dpop_nonce_challenge = "true",
+      oidc_opts = dpop_opts,
+    })
+    test_support.login()
+
+    userinfo_headers = logged_dpop_headers("userinfo")
+    _, first_payload = decode_jwt(userinfo_headers[1])
+    _, second_payload = decode_jwt(userinfo_headers[2])
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("retries the userinfo endpoint call with a nonce-bound DPoP proof", function()
+    assert.error_log_contains("retrying userinfo endpoint call with DPoP nonce")
+    assert.are.equals(2, #userinfo_headers)
+    assert.is_nil(first_payload.nonce)
+    assert.are.equals("userinfo-nonce", second_payload.nonce)
   end)
 end)
 
