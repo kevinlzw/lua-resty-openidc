@@ -278,6 +278,49 @@ local function extract_jwt_from_error_log()
   }
 end
 
+describe("when 'private_key_jwt' auth method is configured with a client_jwt_assertion_alg", function()
+  test_support.start_server({
+    oidc_opts = {
+      discovery = {
+        token_endpoint_auth_methods_supported = { "private_key_jwt" },
+        token_endpoint_auth_signing_alg_values_supported = { "PS256" },
+      },
+      token_endpoint_auth_method = "private_key_jwt",
+      client_rsa_private_key = test_support.load("/spec/private_rsa_key.pem"),
+      client_jwt_assertion_alg = "PS256",
+    }
+  })
+  teardown(test_support.stop_server)
+  test_support.login()
+  local jwt = extract_jwt_from_error_log()
+  it("uses the configured private_key_jwt signing algorithm", function()
+    assert.are.equal("JWT", jwt.header.typ)
+    assert.are.equal("PS256", jwt.header.alg)
+  end)
+end)
+
+describe("when 'private_key_jwt' auth method is configured with an unsupported client_jwt_assertion_alg", function()
+  test_support.start_server({
+    oidc_opts = {
+      discovery = {
+        token_endpoint_auth_methods_supported = { "private_key_jwt" },
+        token_endpoint_auth_signing_alg_values_supported = { "RS256" },
+      },
+      token_endpoint_auth_method = "private_key_jwt",
+      client_rsa_private_key = test_support.load("/spec/private_rsa_key.pem"),
+      client_jwt_assertion_alg = "PS256",
+    }
+  })
+  teardown(test_support.stop_server)
+  local _, status = test_support.login()
+  it("login fails", function()
+    assert.are.equals(401, status)
+  end)
+  it("an error has been logged", function()
+    assert.error_log_contains("client_jwt_assertion_alg %(PS256%) NOT found in token_endpoint_auth_signing_alg_values_supported")
+  end)
+end)
+
 describe("when the token endpoint is invoked using client_secret_jwt", function()
   test_support.start_server({
     oidc_opts = {
@@ -328,6 +371,45 @@ describe("when the token endpoint is invoked using client_secret_jwt", function(
       assert.truthy(jwt.payload.exp)
       assert.is_true(jwt.payload.exp > os.time())
     end)
+  end)
+end)
+
+describe("when the token endpoint is invoked using client_secret_jwt with a client_jwt_assertion_alg", function()
+  test_support.start_server({
+    oidc_opts = {
+      discovery = {
+        token_endpoint_auth_methods_supported = { "client_secret_jwt" },
+        token_endpoint_auth_signing_alg_values_supported = { "HS512" },
+      },
+      client_jwt_assertion_alg = "HS512",
+    }
+  })
+  teardown(test_support.stop_server)
+  test_support.login()
+  local jwt = extract_jwt_from_error_log()
+  it("uses the configured client_secret_jwt signing algorithm", function()
+    assert.are.equal("JWT", jwt.header.typ)
+    assert.are.equal("HS512", jwt.header.alg)
+  end)
+end)
+
+describe("when client_secret_jwt is configured with an asymmetric client_jwt_assertion_alg", function()
+  test_support.start_server({
+    oidc_opts = {
+      discovery = {
+        token_endpoint_auth_methods_supported = { "client_secret_jwt" },
+      },
+      token_endpoint_auth_method = "client_secret_jwt",
+      client_jwt_assertion_alg = "RS256",
+    }
+  })
+  teardown(test_support.stop_server)
+  local _, status = test_support.login()
+  it("login fails", function()
+    assert.are.equals(401, status)
+  end)
+  it("an error has been logged", function()
+    assert.error_log_contains("Can't use asymmetric client_jwt_assertion_alg RS256 with client_secret_jwt")
   end)
 end)
 

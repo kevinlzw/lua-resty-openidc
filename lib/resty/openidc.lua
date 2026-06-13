@@ -621,13 +621,23 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
       if not key then
         return nil, "Can't use " .. auth .. " without a key."
       end
+      local alg = opts.client_jwt_assertion_alg or (auth == "private_key_jwt" and "RS256" or "HS256")
+      if auth == "private_key_jwt" and alg:sub(1, 2) == "HS" then
+        return nil, "Can't use symmetric client_jwt_assertion_alg " .. alg .. " with private_key_jwt."
+      end
+      if auth == "client_secret_jwt" and alg:sub(1, 2) ~= "HS" then
+        return nil, "Can't use asymmetric client_jwt_assertion_alg " .. alg .. " with client_secret_jwt."
+      end
+      if not openidc_supported_discovery_value(opts.discovery.token_endpoint_auth_signing_alg_values_supported, alg) then
+        return nil, "configured value for client_jwt_assertion_alg (" .. alg .. ") NOT found in token_endpoint_auth_signing_alg_values_supported in metadata"
+      end
       body.client_id = opts.client_id
       body.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
       local now = ngx.time()
       local assertion = {
         header = {
           typ = "JWT",
-          alg = auth == "private_key_jwt" and "RS256" or "HS256",
+          alg = alg,
         },
         payload = {
           iss = opts.client_id,

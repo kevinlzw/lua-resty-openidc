@@ -3,6 +3,8 @@ unreleased
   RFC 9126) through the opt-in use_par option.
 - added support for OAuth 2.0 DPoP client proof generation (RFC 9449)
   through the opt-in use_dpop option.
+- added support for configuring the client assertion JWT signing algorithm
+  with client_jwt_assertion_alg.
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526
